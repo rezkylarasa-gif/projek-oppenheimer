@@ -584,11 +584,11 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
         {/* Navigation Tabs */}
-        <div className="flex items-center justify-between border-b border-slate-700/80 pb-4">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-slate-700/50 flex gap-2 pt-2 overflow-x-auto whitespace-nowrap scrollbar-none">
           <div className="flex items-center gap-2 bg-slate-800/80 p-1.5 rounded-xl border border-slate-700/80">
             <button
               onClick={() => setActiveTab("attendance")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+               className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all cursor-pointer shrink-0 ${
                 activeTab === "attendance"
                   ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20"
                   : "text-slate-400 hover:text-slate-200"
