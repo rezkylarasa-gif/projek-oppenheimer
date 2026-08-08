@@ -302,6 +302,18 @@ export default function App() {
     setPassword("");
   };
 
+    // Reset All Attendance History
+  const handleResetAttendance = async () => {
+    if (!confirm("⚠️ Peringatan: Apakah Anda yakin ingin menghapus SELURUH riwayat presensi? Tindakan ini tidak dapat dibatalkan!")) return;
+    
+    try {
+      await remove(ref(database, "attendance"));
+      alert("Riwayat presensi berhasil dikosongkan.");
+    } catch (err) {
+      console.error("Gagal mereset presensi:", err);
+      alert("Gagal mereset database.");
+    }
+  };
   // Quick Register Modal Opener
   const openRegisterModalForUid = (uidToRegister: string) => {
     setRegUid(uidToRegister);
@@ -741,6 +753,28 @@ export default function App() {
                   <option value="All">Semua Status</option>
                   <option value="Hadir">Hadir</option>
                 </select>
+                              <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-start">
+                <div className="flex items-center gap-2">
+                  <Filter className="w-4 h-4 text-slate-400" />
+                  <span className="text-xs text-slate-400 font-medium">Status:</span>
+                  <select
+                    value={selectedStatus}
+                    onChange={(e) => setSelectedStatus(e.target.value)}
+                    className="bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                  >
+                    <option value="All">Semua Status</option>
+                    <option value="Hadir">Hadir</option>
+                  </select>
+                </div>
+
+                <button
+                  onClick={handleResetAttendance}
+                  className="px-3 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/30 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Reset Riwayat
+                </button>
+              </div>
               </div>
             </div>
 
