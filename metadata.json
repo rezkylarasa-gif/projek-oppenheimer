@@ -1,0 +1,6 @@
+{
+  "name": "Aplikasi Presensi RFID",
+  "description": "Aplikasi presensi berbasis RFID secara real-time dari ESP32 menggunakan Firebase Realtime Database",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
