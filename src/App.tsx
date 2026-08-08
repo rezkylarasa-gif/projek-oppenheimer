@@ -256,23 +256,34 @@ export default function App() {
       return;
     }
 
+        // 1. Cek dulu apakah mencoba masuk pakai akun bypass lokal admin
+    if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+      setIsBypassLoggedIn(true);
+      setIsLoadingAuth(false);
+      return;
+    }
+
+    // 2. Jika bukan akun admin bypass lokal, verifikasi wajib lewat Firebase Auth
     if (auth) {
       try {
         await signInWithEmailAndPassword(auth, email, password);
         setIsLoadingAuth(false);
         return;
       } catch (err: any) {
-        console.warn("Firebase Auth Error, fallback active:", err);
+        console.error("Firebase Auth error:", err);
+        let msg = "Email atau password salah.";
+        if (err.code === "auth/invalid-email") msg = "Format email tidak valid.";
+        if (err.code === "auth/user-not-found") msg = "Akun tidak ditemukan.";
+        if (err.code === "auth/wrong-password") msg = "Password salah.";
+        
+        setLoginError(msg);
+        setIsLoadingAuth(false);
+        return; // Menghentikan login jika salah di Firebase
       }
     }
 
-    if (password.length >= 4) {
-      setIsBypassLoggedIn(true);
-      setIsLoadingAuth(false);
-      return;
-    }
-
-    setLoginError("Email atau password tidak valid.");
+    // 3. Jika firebase auth tidak aktif & bukan admin lokal
+    setLoginError("Email atau password salah.");
     setIsLoadingAuth(false);
   };
 
