@@ -1,20 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { database, auth } from "./firebase";
-import { ref, onValue, set } from "firebase/database";
+import { ref, onValue, set, remove } from "firebase/database";
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged, User } from "firebase/auth";
-import { playBeepSound, playNewCardSound } from "./utils/sound";
-import { 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  Tooltip, 
-  ResponsiveContainer, 
-  Cell, 
-  PieChart, 
-  Pie, 
-  Legend 
-} from "recharts";
 import { 
   Radio, 
   UserCheck, 
@@ -34,16 +21,11 @@ import {
   UserPlus,
   BarChart3,
   Users,
-  Sparkles,
-  X,
-  Plus,
-  Edit3,
-  CreditCard,
   Bell,
-  Check,
+  X,
+  Trash2,
   TrendingUp,
-  LayoutDashboard,
-  Table as TableIcon
+  Sparkles
 } from "lucide-react";
 
 interface AttendanceRecord {
@@ -56,16 +38,51 @@ interface AttendanceRecord {
 
 interface Student {
   uid: string;
-  nama: string;
   nim: string;
+  nama: string;
   kelas: string;
 }
 
-interface QuickRegisterNotification {
+interface ToastNotification {
+  id: string;
   uid: string;
+  name?: string;
   timestamp: string;
-  tanggal: string;
+  isNewStudent: boolean;
 }
+
+// KREDENSIAL LOGIN ADMIN
+const ADMIN_EMAIL = "admin@presensi.com";
+const ADMIN_PASSWORD = "admin";
+
+// Sound Generator using Web Audio API (Zero external assets)
+const playScanChime = (soundEnabled: boolean) => {
+  if (!soundEnabled) return;
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    
+    // Play dual-tone chime (High pitched beep beep)
+    const playNote = (freq: number, startTime: number, duration: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + startTime);
+      gain.gain.setValueAtTime(0.12, ctx.currentTime + startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startTime + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + startTime);
+      osc.stop(ctx.currentTime + startTime + duration);
+    };
+
+    playNote(659.25, 0, 0.12);   // E5
+    playNote(880.00, 0.12, 0.2); // A5
+  } catch (e) {
+    console.warn("Audio Context playback prevented by browser:", e);
+  }
+};
 
 export default function App() {
   // Authentication State
@@ -78,37 +95,29 @@ export default function App() {
 
   // Realtime Data State
   const [attendanceList, setAttendanceList] = useState<AttendanceRecord[]>([]);
-  const [students, setStudents] = useState<Record<string, Student>>({});
+  const [studentList, setStudentList] = useState<Student[]>([]);
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isDatabaseConnected, setIsDatabaseConnected] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
 
-  // Settings & Sound State
+  // Active Tab: "presensi" | "mahasiswa" | "grafik"
+  const [activeTab, setActiveTab] = useState<"presensi" | "mahasiswa" | "grafik">("presensi");
+
+  // Fitur 5: Sound & Notification State
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<"attendance" | "analytics" | "students">("attendance");
+  const [toast, setToast] = useState<ToastNotification | null>(null);
+  const previousRecordCount = useRef<number | null>(null);
+
+  // Fitur 3: Quick Register State & Modal
+  const [quickRegUid, setQuickRegUid] = useState<string | null>(null);
+  const [isQuickRegModalOpen, setIsQuickRegModalOpen] = useState(false);
+  const [inputNim, setInputNim] = useState("");
+  const [inputNama, setInputNama] = useState("");
+  const [inputKelas, setInputKelas] = useState("");
 
   // Filter State
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedStatus, setSelectedStatus] = useState<string>("All");
-
-  // Notifications & Quick Register Modal State
-  const [quickNotification, setQuickNotification] = useState<QuickRegisterNotification | null>(null);
-  const [latestToast, setLatestToast] = useState<{ uid: string; nama?: string; time: string } | null>(null);
-  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
-  
-  // Registration Form State
-  const [regUid, setRegUid] = useState("");
-  const [regNama, setRegNama] = useState("");
-  const [regNim, setRegNim] = useState("");
-  const [regKelas, setRegKelas] = useState("TE C");
-  const [regSuccessMsg, setRegSuccessMsg] = useState("");
-
-  const prevAttendanceCountRef = useRef<number | null>(null);
-
-  // Helper to sanitize Firebase Keys
-  const sanitizeKey = (uid: string) => {
-    return uid.trim().replace(/[\.\#\$\[\]\/]/g, "_");
-  };
 
   // Check Auth State on mount
   useEffect(() => {
@@ -125,124 +134,134 @@ export default function App() {
 
   const isLoggedIn = user !== null || isBypassLoggedIn;
 
-  // Realtime Students Listener
+  // Realtime Students Data Listener
   useEffect(() => {
-    if (!isLoggedIn) return;
+    if (!isLoggedIn || !database) return;
 
-    const studentsRef = ref(database, "students");
-    const unsubscribe = onValue(
-      studentsRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.val();
-          setStudents(data || {});
-        } else {
-          setStudents({});
+    try {
+      const studentsRef = ref(database, "students");
+      const unsubscribe = onValue(studentsRef, (snapshot) => {
+        if (!snapshot.exists()) {
+          setStudentList([]);
+          return;
         }
-      },
-      (error) => {
-        console.warn("Error fetching students path:", error);
-      }
-    );
+        const data = snapshot.val();
+        const parsed: Student[] = Object.values(data);
+        setStudentList(parsed);
+      });
 
-    return () => unsubscribe();
+      return () => unsubscribe();
+    } catch (err: any) {
+      console.error("Gagal mendengarkan data mahasiswa:", err);
+    }
   }, [isLoggedIn]);
 
   // Realtime Attendance Data Listener
   useEffect(() => {
-    if (!isLoggedIn) return;
+    if (!isLoggedIn || !database) {
+      if (isLoggedIn && !database) {
+        setIsLoadingData(false);
+        setDbError("Firebase Database belum terhubung. Periksa konfigurasi API Key.");
+      }
+      return;
+    }
 
     setIsLoadingData(true);
     setDbError(null);
 
-    const attendanceRef = ref(database, "attendance");
+    try {
+      const attendanceRef = ref(database, "attendance");
 
-    const unsubscribe = onValue(
-      attendanceRef,
-      (snapshot) => {
-        setIsLoadingData(false);
-        setIsDatabaseConnected(true);
+      const unsubscribe = onValue(
+        attendanceRef,
+        (snapshot) => {
+          setIsLoadingData(false);
+          setIsDatabaseConnected(true);
 
-        if (!snapshot.exists()) {
-          setAttendanceList([]);
-          return;
-        }
+          if (!snapshot.exists()) {
+            setAttendanceList([]);
+            previousRecordCount.current = 0;
+            return;
+          }
 
-        const data = snapshot.val();
-        let parsedRecords: AttendanceRecord[] = [];
+          const data = snapshot.val();
+          let parsedRecords: AttendanceRecord[] = [];
 
-        if (Array.isArray(data)) {
-          parsedRecords = data
-            .filter(Boolean)
-            .map((item, idx) => ({
-              id: String(idx),
-              uid: item.uid || item.UID || item.card_uid || "-",
-              status: item.status || item.Status || "Hadir",
-              tanggal: item.tanggal || item.Tanggal || item.date || "-",
-              timestamp: item.timestamp || item.Timestamp || item.waktu || item.time || "-",
-            }));
-        } else if (typeof data === "object" && data !== null) {
-          parsedRecords = Object.entries(data).map(([key, val]: [string, any]) => {
-            const item = val || {};
-            return {
-              id: key,
-              uid: item.uid || item.UID || item.card_uid || "-",
-              status: item.status || item.Status || "Hadir",
-              tanggal: item.tanggal || item.Tanggal || item.date || "-",
-              timestamp: item.timestamp || item.Timestamp || item.waktu || item.time || "-",
-            };
-          });
-        }
-
-        const sortedNewestFirst = parsedRecords.reverse();
-
-        // Detect new incoming tap for Audio and Quick Register popup
-        if (prevAttendanceCountRef.current !== null && sortedNewestFirst.length > prevAttendanceCountRef.current) {
-          const newestRecord = sortedNewestFirst[0];
-          if (newestRecord && newestRecord.uid !== "-") {
-            const sanitized = sanitizeKey(newestRecord.uid);
-            const studentInfo = students[sanitized];
-
-            if (soundEnabled) {
-              if (studentInfo) {
-                playBeepSound();
-              } else {
-                playNewCardSound();
-              }
-            }
-
-            // Trigger real-time floating toast
-            setLatestToast({
-              uid: newestRecord.uid,
-              nama: studentInfo ? studentInfo.nama : undefined,
-              time: newestRecord.timestamp
+          if (Array.isArray(data)) {
+            parsedRecords = data
+              .filter(Boolean)
+              .map((item, idx) => ({
+                id: String(idx),
+                uid: item.uid || item.UID || item.card_uid || "-",
+                status: item.status || item.Status || "Hadir",
+                tanggal: item.tanggal || item.Tanggal || item.date || "-",
+                timestamp: item.timestamp || item.Timestamp || item.waktu || item.time || "-",
+              }));
+          } else if (typeof data === "object" && data !== null) {
+            parsedRecords = Object.entries(data).map(([key, val]: [string, any]) => {
+              const item = val || {};
+              return {
+                id: key,
+                uid: item.uid || item.UID || item.card_uid || "-",
+                status: item.status || item.Status || "Hadir",
+                tanggal: item.tanggal || item.Tanggal || item.date || "-",
+                timestamp: item.timestamp || item.Timestamp || item.waktu || item.time || "-",
+              };
             });
-            setTimeout(() => setLatestToast(null), 5000);
+          }
 
-            // If card is NOT registered yet, trigger Quick Register Notification Pop-up!
-            if (!studentInfo) {
-              setQuickNotification({
-                uid: newestRecord.uid,
-                timestamp: newestRecord.timestamp,
-                tanggal: newestRecord.tanggal
+          const newestList = parsedRecords.reverse();
+
+          // Check for new incoming scan for Fitur 5 (Sound & Toast)
+          if (
+            previousRecordCount.current !== null &&
+            newestList.length > previousRecordCount.current
+          ) {
+            const newest = newestList[0];
+            if (newest) {
+              const studentMatch = studentList.find(
+                (s) => s.uid.replace(/\s+/g, "").toUpperCase() === newest.uid.replace(/\s+/g, "").toUpperCase()
+              );
+
+              playScanChime(soundEnabled);
+
+              setToast({
+                id: Date.now().toString(),
+                uid: newest.uid,
+                name: studentMatch ? studentMatch.nama : undefined,
+                timestamp: newest.timestamp,
+                isNewStudent: !studentMatch,
               });
+
+              setTimeout(() => {
+                setToast(null);
+              }, 5000);
             }
           }
+
+          previousRecordCount.current = newestList.length;
+          setAttendanceList(newestList);
+        },
+        (error) => {
+          console.error("Firebase Realtime Database listener error:", error);
+          setIsLoadingData(false);
+          setIsDatabaseConnected(false);
+          setDbError(error.message || "Gagal terhubung ke Firebase Realtime Database");
         }
+      );
 
-        prevAttendanceCountRef.current = sortedNewestFirst.length;
-        setAttendanceList(sortedNewestFirst);
-      },
-      (error) => {
-        console.error("Firebase Realtime Database listener error:", error);
-        setIsLoadingData(false);
-        setIsDatabaseConnected(false);
-        setDbError(error.message || "Gagal terhubung ke Firebase Realtime Database");
-      }
-    );
+      return () => unsubscribe();
+    } catch (err: any) {
+      console.error("Attendance listener crash caught:", err);
+      setIsLoadingData(false);
+    }
+  }, [isLoggedIn, soundEnabled, studentList]);
 
-    return () => unsubscribe();
-  }, [isLoggedIn, soundEnabled, students]);
+  // Helper: Find Student Data by UID
+  const getStudentByUid = (uid: string) => {
+    const formatted = uid.replace(/\s+/g, "").toUpperCase();
+    return studentList.find((s) => s.uid.replace(/\s+/g, "").toUpperCase() === formatted);
+  };
 
   // Handle Login
   const handleLogin = async (e: React.FormEvent) => {
@@ -250,41 +269,50 @@ export default function App() {
     setLoginError("");
     setIsLoadingAuth(true);
 
-    if (!email || !password) {
+    const targetEmail = email.trim();
+    const targetPassword = password.trim();
+
+    if (!targetEmail || !targetPassword) {
       setLoginError("Email dan password wajib diisi");
       setIsLoadingAuth(false);
       return;
     }
 
-        // 1. Cek dulu apakah mencoba masuk pakai akun bypass lokal admin
-    if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+    // 1. Cek Bypass Admin Lokal (Instant Login tanpa memanggil Firebase)
+    if (
+      (targetEmail === ADMIN_EMAIL && targetPassword === ADMIN_PASSWORD) ||
+      !import.meta.env.VITE_FIREBASE_API_KEY
+    ) {
       setIsBypassLoggedIn(true);
       setIsLoadingAuth(false);
       return;
     }
 
-    // 2. Jika bukan akun admin bypass lokal, verifikasi wajib lewat Firebase Auth
-    if (auth) {
-      try {
-        await signInWithEmailAndPassword(auth, email, password);
-        setIsLoadingAuth(false);
-        return;
-      } catch (err: any) {
-        console.error("Firebase Auth error:", err);
-        let msg = "Email atau password salah.";
-        if (err.code === "auth/invalid-email") msg = "Format email tidak valid.";
-        if (err.code === "auth/user-not-found") msg = "Akun tidak ditemukan.";
-        if (err.code === "auth/wrong-password") msg = "Password salah.";
-        
-        setLoginError(msg);
-        setIsLoadingAuth(false);
-        return; // Menghentikan login jika salah di Firebase
-      }
-    }
+    // 2. Login menggunakan Firebase Auth dengan Timeout Max 4 Detik (Cegah Stuck)
+    try {
+      const loginPromise = signInWithEmailAndPassword(auth, targetEmail, targetPassword);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Koneksi Firebase sangat lambat / timeout.")), 4000)
+      );
 
-    // 3. Jika firebase auth tidak aktif & bukan admin lokal
-    setLoginError("Email atau password salah.");
-    setIsLoadingAuth(false);
+      await Promise.race([loginPromise, timeoutPromise]);
+    } catch (err: any) {
+      console.error("Login Auth Error:", err);
+      let msg = "Email atau password salah.";
+      if (err.message && err.message.includes("timeout")) {
+        msg = "Gagal terhubung ke Firebase Auth. Gunakan akun admin@presensi.com (pass: admin).";
+      } else if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password") {
+        msg = "Email atau password yang Anda masukkan salah.";
+      } else if (err.code === "auth/user-not-found") {
+        msg = "Akun email belum terdaftar di Firebase.";
+      } else if (err.code === "auth/invalid-api-key") {
+        msg = "API Key Firebase tidak valid. Periksa file .env Anda.";
+      }
+      setLoginError(msg);
+    } finally {
+      // DIPASTIKAN SELALU MATI (TIDAK AKAN STUCK "MEMPROSES...")
+      setIsLoadingAuth(false);
+    }
   };
 
   // Handle Logout
@@ -302,7 +330,52 @@ export default function App() {
     setPassword("");
   };
 
-    // Reset All Attendance History
+  // Fitur 3: Save Student Data (Quick Register & Master)
+  const handleSaveStudent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetUid = quickRegUid || inputNim;
+
+    if (!targetUid || !inputNama || !inputNim) {
+      alert("NIM, Nama, dan UID wajib diisi!");
+      return;
+    }
+
+    const studentKey = targetUid.replace(/\s+/g, "_").toUpperCase();
+
+    try {
+      await set(ref(database, `students/${studentKey}`), {
+        uid: targetUid.trim().toUpperCase(),
+        nim: inputNim.trim(),
+        nama: inputNama.trim(),
+        kelas: inputKelas.trim() || "-",
+      });
+
+      setInputNim("");
+      setInputNama("");
+      setInputKelas("");
+      setQuickRegUid(null);
+      setIsQuickRegModalOpen(false);
+
+      alert("Data mahasiswa berhasil disimpan!");
+    } catch (err) {
+      console.error("Gagal menyimpan mahasiswa:", err);
+      alert("Gagal menyimpan data ke Firebase.");
+    }
+  };
+
+  // Delete Student
+  const handleDeleteStudent = async (uid: string, nama: string) => {
+    if (!confirm(`Yakin menghapus mahasiswa ${nama} (${uid})?`)) return;
+
+    const studentKey = uid.replace(/\s+/g, "_").toUpperCase();
+    try {
+      await remove(ref(database, `students/${studentKey}`));
+    } catch (err) {
+      console.error("Gagal menghapus:", err);
+    }
+  };
+
+  // Reset All Attendance History
   const handleResetAttendance = async () => {
     if (!confirm("⚠️ Peringatan: Apakah Anda yakin ingin menghapus SELURUH riwayat presensi? Tindakan ini tidak dapat dibatalkan!")) return;
     
@@ -314,68 +387,29 @@ export default function App() {
       alert("Gagal mereset database.");
     }
   };
-  // Quick Register Modal Opener
-  const openRegisterModalForUid = (uidToRegister: string) => {
-    setRegUid(uidToRegister);
-    const existing = students[sanitizeKey(uidToRegister)];
-    if (existing) {
-      setRegNama(existing.nama);
-      setRegNim(existing.nim);
-      setRegKelas(existing.kelas || "TE C");
-    } else {
-      setRegNama("");
-      setRegNim("");
-      setRegKelas("TE C");
-    }
-    setRegSuccessMsg("");
-    setIsRegisterModalOpen(true);
-    setQuickNotification(null);
-  };
 
-  // Submit Register Student
-  const handleSaveStudent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!regUid || !regNama || !regNim) {
-      alert("Harap isi UID, Nama, dan NIM.");
-      return;
-    }
-
-    const key = sanitizeKey(regUid);
-    const newStudentObj: Student = {
-      uid: regUid.trim(),
-      nama: regNama.trim(),
-      nim: regNim.trim(),
-      kelas: regKelas.trim()
-    };
-
-    try {
-      await set(ref(database, `students/${key}`), newStudentObj);
-      setRegSuccessMsg(`Berhasil mendaftarkan ${regNama} (${regNim})!`);
-      setTimeout(() => {
-        setIsRegisterModalOpen(false);
-        setRegSuccessMsg("");
-      }, 1200);
-    } catch (err: any) {
-      console.error("Gagal mendaftarkan mahasiswa ke Firebase:", err);
-      alert("Terjadi kesalahan saat menyimpan ke database.");
-    }
+  // Quick Register Trigger from Unregistered Card
+  const openQuickRegister = (uid: string) => {
+    setQuickRegUid(uid);
+    setIsQuickRegModalOpen(true);
+    setInputNama("");
+    setInputNim("");
+    setInputKelas("");
   };
 
   // Filter Attendance List
   const filteredList = attendanceList.filter((item) => {
-    const student = students[sanitizeKey(item.uid)];
-    const studentName = student ? student.nama.toLowerCase() : "";
-    const studentNim = student ? student.nim.toLowerCase() : "";
-    const studentKelas = student ? student.kelas.toLowerCase() : "";
-
+    const studentMatch = getStudentByUid(item.uid);
     const searchLower = searchTerm.toLowerCase();
+
     const matchesSearch =
       item.uid.toLowerCase().includes(searchLower) ||
       item.tanggal.toLowerCase().includes(searchLower) ||
       item.timestamp.toLowerCase().includes(searchLower) ||
-      studentName.includes(searchLower) ||
-      studentNim.includes(searchLower) ||
-      studentKelas.includes(searchLower);
+      (studentMatch &&
+        (studentMatch.nama.toLowerCase().includes(searchLower) ||
+          studentMatch.nim.toLowerCase().includes(searchLower) ||
+          studentMatch.kelas.toLowerCase().includes(searchLower)));
 
     const matchesStatus =
       selectedStatus === "All" ||
@@ -384,35 +418,18 @@ export default function App() {
     return matchesSearch && matchesStatus;
   });
 
-  // Analytics Computation
-  const todayDateStr = new Date().toISOString().split("T")[0];
-  const todayPresensiCount = attendanceList.filter(
-    (item) => item.tanggal === todayDateStr || item.tanggal.includes(todayDateStr)
-  ).length;
-
-  const totalRegisteredCount = Object.keys(students).length;
+  // Fitur 4: Analytical Calculations
+  const totalScans = attendanceList.length;
+  const totalRegisteredStudents = studentList.length;
   
-  // Class attendance breakdown for chart
-  const classCounts: Record<string, number> = {};
-  attendanceList.forEach((record) => {
-    const student = students[sanitizeKey(record.uid)];
-    const k = student ? student.kelas : "Lainnya/Unregistered";
-    classCounts[k] = (classCounts[k] || 0) + 1;
-  });
+  const todayDateStr = new Date().toISOString().split("T")[0];
+  const todayScans = attendanceList.filter(
+    (item) => item.tanggal === todayDateStr || item.tanggal.includes(todayDateStr)
+  );
 
-  const classChartData = Object.entries(classCounts).map(([kelas, count]) => ({
-    kelas,
-    count,
-    percentage: Math.round((count / (attendanceList.length || 1)) * 100)
-  }));
-
-  const registeredTappedCount = attendanceList.filter(r => !!students[sanitizeKey(r.uid)]).length;
-  const unregisteredTappedCount = attendanceList.length - registeredTappedCount;
-
-  const pieData = [
-    { name: "Terdaftar", value: registeredTappedCount, color: "#6366f1" },
-    { name: "Belum Terdaftar", value: unregisteredTappedCount, color: "#f43f5e" }
-  ];
+  const unregisteredCount = attendanceList.filter(
+    (item) => !getStudentByUid(item.uid)
+  ).length;
 
   // Render Login Page
   if (!isLoggedIn) {
@@ -421,14 +438,14 @@ export default function App() {
         <div className="w-full max-w-md bg-slate-800/90 border border-slate-700/80 rounded-2xl p-8 shadow-2xl backdrop-blur-sm">
           {/* Header */}
           <div className="text-center mb-8">
-            <div className="w-10 h-10 rounded-xl overflow-hidden">
-  <img src="/logo.png" alt="Logo" className="w-full h-full object-contain" />
-</div>
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 mb-4">
+              <Radio className="w-8 h-8 animate-pulse" />
+            </div>
             <h1 className="text-2xl font-bold tracking-tight text-white">
               Sistem Presensi RFID
             </h1>
             <p className="text-slate-400 text-sm mt-1">
-              Monitoring Data Presensi Realtime ESP32
+              Monitoring Realtime ESP32 & Analytics
             </p>
           </div>
 
@@ -443,7 +460,7 @@ export default function App() {
 
             <div>
               <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
-                Email
+                Email Admin
               </label>
               <div className="relative">
                 <Mail className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -451,7 +468,7 @@ export default function App() {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="admin@gmail.com"
+                  placeholder="admin@presensi.com"
                   className="w-full pl-11 pr-4 py-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all text-sm"
                   required
                 />
@@ -490,8 +507,6 @@ export default function App() {
               )}
             </button>
           </form>
-
-          
         </div>
       </div>
     );
@@ -499,60 +514,141 @@ export default function App() {
 
   // Render Dashboard
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col relative">
-      {/* Realtime Tap Toast Notification */}
-      {latestToast && (
-        <div className="fixed top-20 right-4 z-50 bg-slate-800 border border-indigo-500/50 text-white p-4 rounded-xl shadow-2xl flex items-center gap-3 animate-bounce max-w-sm">
-          <div className="w-10 h-10 rounded-lg bg-indigo-600/30 text-indigo-400 flex items-center justify-center shrink-0">
-            <Bell className="w-5 h-5 animate-spin" />
-          </div>
-          <div>
-            <p className="text-xs font-semibold text-indigo-300">Tap RFID Dideteksi!</p>
-            <p className="text-sm font-bold text-white mt-0.5">
-              {latestToast.nama ? latestToast.nama : `UID: ${latestToast.uid}`}
-            </p>
-            <p className="text-[11px] text-slate-400 mt-0.5">Waktu: {latestToast.time}</p>
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col relative overflow-x-hidden">
+      {/* Fitur 5: Toast Real-time Popup Banner */}
+      {toast && (
+        <div className="fixed top-20 right-5 z-50 animate-bounce transition-all">
+          <div className="bg-slate-800 border-2 border-indigo-500 text-white px-5 py-4 rounded-2xl shadow-2xl flex items-start gap-4 max-w-sm">
+            <div className="w-10 h-10 rounded-full bg-indigo-500/20 border border-indigo-400 flex items-center justify-center text-indigo-400 shrink-0">
+              <Bell className="w-5 h-5 animate-pulse" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
+                  {toast.isNewStudent ? "Kartu Baru Terdeteksi" : "Presensi Berhasil"}
+                </span>
+                <span className="text-[10px] text-slate-400">{toast.timestamp}</span>
+              </div>
+              <p className="text-sm font-bold text-white truncate mt-0.5">
+                {toast.name || `UID: ${toast.uid}`}
+              </p>
+              {toast.isNewStudent && (
+                <button
+                  onClick={() => openQuickRegister(toast.uid)}
+                  className="mt-2 text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium transition-all"
+                >
+                  + Daftarkan Mahasiswa Ini
+                </button>
+              )}
+            </div>
+            <button
+              onClick={() => setToast(null)}
+              className="text-slate-400 hover:text-white transition-all"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         </div>
       )}
 
-      {/* Quick Register Banner Notification */}
-      {quickNotification && (
-        <div className="fixed bottom-6 right-6 z-50 bg-gradient-to-r from-rose-900/90 to-amber-900/90 border border-amber-500/60 text-white p-4 rounded-2xl shadow-2xl flex items-center gap-4 max-w-md backdrop-blur-md">
-          <div className="w-12 h-12 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-400/40 flex items-center justify-center shrink-0">
-            <Sparkles className="w-6 h-6 animate-pulse" />
+      {/* Modal Quick Register (Fitur 3) */}
+      {isQuickRegModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-700 pb-3">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <UserPlus className="w-5 h-5 text-indigo-400" />
+                <span>Registrasi Mahasiswa Baru</span>
+              </h3>
+              <button
+                onClick={() => setIsQuickRegModalOpen(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveStudent} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  UID Kartu RFID
+                </label>
+                <input
+                  type="text"
+                  value={quickRegUid || ""}
+                  readOnly
+                  className="w-full px-3.5 py-2 bg-slate-900 border border-slate-700 rounded-xl text-indigo-400 font-mono text-sm font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  NIM Mahasiswa
+                </label>
+                <input
+                  type="text"
+                  value={inputNim}
+                  onChange={(e) => setInputNim(e.target.value)}
+                  placeholder="Contoh: 210101088"
+                  className="w-full px-3.5 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Nama Lengkap
+                </label>
+                <input
+                  type="text"
+                  value={inputNama}
+                  onChange={(e) => setInputNama(e.target.value)}
+                  placeholder="Contoh: Budi Santoso"
+                  className="w-full px-3.5 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Kelas / Jurusan
+                </label>
+                <input
+                  type="text"
+                  value={inputKelas}
+                  onChange={(e) => setInputKelas(e.target.value)}
+                  placeholder="Contoh: TI-3A"
+                  className="w-full px-3.5 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                />
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setIsQuickRegModalOpen(false)}
+                  className="flex-1 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium rounded-xl transition-all"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl transition-all shadow-lg shadow-indigo-600/30"
+                >
+                  Simpan Mahasiswa
+                </button>
+              </div>
+            </form>
           </div>
-          <div className="flex-1">
-            <span className="text-xs font-semibold uppercase tracking-wider text-amber-300">
-              ⚡ Kartu Baru Dideteksi!
-            </span>
-            <p className="text-sm font-bold font-mono text-white mt-0.5">
-              UID: {quickNotification.uid}
-            </p>
-            <button
-              onClick={() => openRegisterModalForUid(quickNotification.uid)}
-              className="mt-2 text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-900 px-3 py-1.5 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Klik untuk Isi Nama & NIM</span>
-            </button>
-          </div>
-          <button
-            onClick={() => setQuickNotification(null)}
-            className="text-slate-400 hover:text-white p-1"
-          >
-            <X className="w-4 h-4" />
-          </button>
         </div>
       )}
 
       {/* Navbar */}
       <header className="bg-slate-800/80 border-b border-slate-700/80 sticky top-0 z-20 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl overflow-hidden">
-  <img src="/logo.png" alt="Logo" className="w-full h-full object-contain" />
-</div>
+            <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center">
+              <Radio className="w-5 h-5 animate-pulse" />
+            </div>
             <div>
               <h1 className="text-lg font-bold text-white tracking-tight leading-none">
                 Presensi RFID ESP32
@@ -565,32 +661,23 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Audio Toggle */}
+            {/* Fitur 5: Audio Sound Effect Toggle Button */}
             <button
               onClick={() => setSoundEnabled(!soundEnabled)}
-              title={soundEnabled ? "Mute Beep Sound" : "Enable Beep Sound"}
-              className={`p-2 rounded-lg border text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer ${
+              title={soundEnabled ? "Suara Notifikasi Aktif" : "Suara Notifikasi Mati"}
+              className={`p-2 rounded-lg border text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
                 soundEnabled
                   ? "bg-indigo-600/20 border-indigo-500/40 text-indigo-300 hover:bg-indigo-600/30"
                   : "bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200"
               }`}
             >
-              {soundEnabled ? (
-                <>
-                  <Volume2 className="w-4 h-4 text-indigo-400" />
-                  <span className="hidden sm:inline">Suara On</span>
-                </>
-              ) : (
-                <>
-                  <VolumeX className="w-4 h-4 text-slate-400" />
-                  <span className="hidden sm:inline">Mute</span>
-                </>
-              )}
+              {soundEnabled ? <Volume2 className="w-4 h-4 text-indigo-400" /> : <VolumeX className="w-4 h-4" />}
+              <span className="hidden md:inline">{soundEnabled ? "Suara ON" : "Suara OFF"}</span>
             </button>
 
             <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-900/60 border border-slate-700 rounded-lg text-xs text-slate-300">
               <UserCheck className="w-3.5 h-3.5 text-indigo-400" />
-              <span>{user?.email || "Admin Mode"}</span>
+              <span>{user?.email || email || "User"}</span>
             </div>
 
             <button
@@ -598,124 +685,104 @@ export default function App() {
               className="flex items-center gap-2 px-3.5 py-1.5 bg-slate-700/60 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-slate-600/80 text-xs font-medium transition-all cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
-              <span>Keluar</span>
+              <span className="hidden sm:inline">Keluar</span>
             </button>
           </div>
+        </div>
+
+        {/* Navigation Tabs (Ditambahkan overflow-x-auto & shrink-0 untuk Mobile Responsif) */}
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-slate-700/50 flex gap-2 pt-2 overflow-x-auto whitespace-nowrap scrollbar-none">
+          <button
+            onClick={() => setActiveTab("presensi")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all cursor-pointer shrink-0 ${
+              activeTab === "presensi"
+                ? "border-indigo-500 text-indigo-400 bg-indigo-500/10 rounded-t-lg"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Clock className="w-4 h-4" />
+            <span>Tabel Presensi</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab("mahasiswa")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all cursor-pointer shrink-0 ${
+              activeTab === "mahasiswa"
+                ? "border-indigo-500 text-indigo-400 bg-indigo-500/10 rounded-t-lg"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            <span>Kelola Mahasiswa ({studentList.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab("grafik")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all cursor-pointer shrink-0 ${
+              activeTab === "grafik"
+                ? "border-indigo-500 text-indigo-400 bg-indigo-500/10 rounded-t-lg"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>Statistik & Grafik</span>
+          </button>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        {/* Navigation Tabs */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-slate-700/50 flex gap-2 pt-2 overflow-x-auto whitespace-nowrap scrollbar-none">
-          <div className="flex items-center gap-2 bg-slate-800/80 p-1.5 rounded-xl border border-slate-700/80">
-            <button
-              onClick={() => setActiveTab("attendance")}
-               className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all cursor-pointer shrink-0 ${
-                activeTab === "attendance"
-                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <TableIcon className="w-4 h-4" />
-              <span>Daftar Presensi</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab("analytics")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                activeTab === "analytics"
-                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <BarChart3 className="w-4 h-4" />
-              <span>Statistik & Grafik</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab("students")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                activeTab === "students"
-                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <Users className="w-4 h-4" />
-              <span>Data Mahasiswa ({totalRegisteredCount})</span>
-            </button>
-          </div>
-
-          <button
-            onClick={() => openRegisterModalForUid("")}
-            className="flex items-center gap-2 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-900 font-semibold text-xs rounded-xl shadow-lg shadow-amber-500/20 transition-all cursor-pointer"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span>+ Register Kartu Baru</span>
-          </button>
-        </div>
-
-        {/* Status Bar & Summary Cards */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        {/* Fitur 4: Top Summary Analytical Cards (Diubah grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 untuk HP) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 flex items-center justify-between">
+          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4 flex items-center justify-between">
             <div>
-              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">
-                Total Presensi Tap
+              <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                Total Presensi
               </p>
-              <p className="text-2xl font-bold text-white mt-1">
-                {attendanceList.length}
-              </p>
+              <p className="text-2xl font-bold text-white mt-1">{totalScans}</p>
             </div>
-            <div className="w-12 h-12 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center">
-              <UserCheck className="w-6 h-6" />
+            <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center">
+              <UserCheck className="w-5 h-5" />
             </div>
           </div>
 
-          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 flex items-center justify-between">
+          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4 flex items-center justify-between">
             <div>
-              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">
+              <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                 Mahasiswa Terdaftar
               </p>
-              <p className="text-2xl font-bold text-emerald-400 mt-1">
-                {totalRegisteredCount}
-              </p>
+              <p className="text-2xl font-bold text-emerald-400 mt-1">{totalRegisteredStudents}</p>
             </div>
-            <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
-              <Users className="w-6 h-6" />
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
+              <Users className="w-5 h-5" />
             </div>
           </div>
 
-          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 flex items-center justify-between">
+          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4 flex items-center justify-between">
             <div>
-              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">
-                Kartu Belum Terdaftar
+              <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                Presensi Hari Ini
               </p>
-              <p className="text-2xl font-bold text-rose-400 mt-1">
-                {unregisteredTappedCount}
-              </p>
+              <p className="text-2xl font-bold text-sky-400 mt-1">{todayScans.length}</p>
             </div>
-            <div className="w-12 h-12 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-center justify-center">
-              <CreditCard className="w-6 h-6" />
+            <div className="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 flex items-center justify-center">
+              <Calendar className="w-5 h-5" />
             </div>
           </div>
 
-          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 flex items-center justify-between">
+          <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4 flex items-center justify-between">
             <div>
-              <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">
-                Koneksi Realtime
+              <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                Belum Terdaftar
               </p>
-              <p className="text-sm font-semibold text-sky-400 mt-1 flex items-center gap-1.5">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
-                <span>ESP32 Ready</span>
-              </p>
+              <p className="text-2xl font-bold text-amber-400 mt-1">{unregisteredCount}</p>
             </div>
-            <div className="w-10 h-10 rounded-xl overflow-hidden">
-  <img src="/logo.png" alt="Logo" className="w-full h-full object-contain" />
-</div>
+            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center">
+              <UserPlus className="w-5 h-5" />
+            </div>
           </div>
         </div>
 
-        {/* Database Error Warning */}
         {dbError && (
           <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300 text-sm flex items-start gap-3">
             <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-amber-400" />
@@ -726,10 +793,10 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 1: ATTENDANCE TABLE */}
-        {activeTab === "attendance" && (
-          <div className="space-y-6">
-            {/* Table Filter Controls */}
+        {/* TAB 1: TABEL PRESENSI */}
+        {activeTab === "presensi" && (
+          <div className="space-y-4">
+            {/* Filter Controls & Reset Button */}
             <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
               <div className="relative w-full sm:w-80">
                 <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -742,18 +809,7 @@ export default function App() {
                 />
               </div>
 
-              <div className="flex items-center gap-2 w-full sm:w-auto">
-                <Filter className="w-4 h-4 text-slate-400" />
-                <span className="text-xs text-slate-400 font-medium">Status:</span>
-                <select
-                  value={selectedStatus}
-                  onChange={(e) => setSelectedStatus(e.target.value)}
-                  className="bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                >
-                  <option value="All">Semua Status</option>
-                  <option value="Hadir">Hadir</option>
-                </select>
-                              <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-start">
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-start">
                 <div className="flex items-center gap-2">
                   <Filter className="w-4 h-4 text-slate-400" />
                   <span className="text-xs text-slate-400 font-medium">Status:</span>
@@ -775,10 +831,9 @@ export default function App() {
                   Reset Riwayat
                 </button>
               </div>
-              </div>
             </div>
 
-            {/* Attendance Table Section */}
+            {/* Table */}
             <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl shadow-xl overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
                 <h2 className="text-base font-semibold text-white flex items-center gap-2">
@@ -787,7 +842,7 @@ export default function App() {
                     {filteredList.length} Entri
                   </span>
                 </h2>
-                <span className="text-xs text-slate-400 font-mono">Firebase /attendance/</span>
+                <span className="text-xs text-slate-400">Path: /attendance/</span>
               </div>
 
               <div className="overflow-x-auto">
@@ -795,12 +850,12 @@ export default function App() {
                   <thead className="bg-slate-900/60 text-slate-400 uppercase text-[11px] font-semibold tracking-wider border-b border-slate-700/80">
                     <tr>
                       <th className="px-6 py-3.5">No</th>
-                      <th className="px-6 py-3.5">Nama & NIM</th>
                       <th className="px-6 py-3.5">UID RFID</th>
+                      <th className="px-6 py-3.5">Mahasiswa (NIM)</th>
                       <th className="px-6 py-3.5">Status</th>
                       <th className="px-6 py-3.5">Tanggal</th>
                       <th className="px-6 py-3.5">Waktu</th>
-                      <th className="px-6 py-3.5 text-right">Aksi</th>
+                      <th className="px-6 py-3.5">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700/50 text-slate-200">
@@ -816,94 +871,51 @@ export default function App() {
                     ) : filteredList.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="px-6 py-16 text-center">
-                          <div className="flex flex-col items-center justify-center gap-3 text-slate-400">
-                            <div className="w-10 h-10 rounded-xl overflow-hidden">
-  <img src="/logo.png" alt="Logo" className="w-full h-full object-contain" />
-</div>
-                            <p className="text-base font-medium text-slate-300">
-                              Belum ada data presensi
-                            </p>
-                            <p className="text-xs text-slate-500 max-w-sm">
-                              Data presensi yang dipindai dari ESP32 di path /attendance/ akan muncul di sini secara otomatis.
+                          <div className="flex flex-col items-center justify-center text-slate-400 gap-2">
+                            <Search className="w-8 h-8 text-slate-500 stroke-1" />
+                            <p className="font-medium text-slate-300">Belum ada data presensi</p>
+                            <p className="text-xs text-slate-500">
+                              Tempelkan kartu RFID pada scanner ESP32 untuk mencatat presensi.
                             </p>
                           </div>
                         </td>
                       </tr>
                     ) : (
                       filteredList.map((item, index) => {
-                        const student = students[sanitizeKey(item.uid)];
+                        const student = getStudentByUid(item.uid);
                         return (
-                          <tr
-                            key={item.id}
-                            className="hover:bg-slate-700/30 transition-colors"
-                          >
-                            <td className="px-6 py-4 text-xs text-slate-400 font-mono">
-                              {index + 1}
+                          <tr key={item.id || index} className="hover:bg-slate-700/30 transition-colors">
+                            <td className="px-6 py-4 text-xs font-mono text-slate-400">{index + 1}</td>
+                            <td className="px-6 py-4 font-mono font-semibold text-indigo-300">
+                              {item.uid}
                             </td>
-
                             <td className="px-6 py-4">
                               {student ? (
                                 <div>
-                                  <p className="font-semibold text-white text-sm">{student.nama}</p>
-                                  <p className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
-                                    <span>NIM: {student.nim}</span>
-                                    <span className="px-1.5 py-0.2 bg-slate-700 text-indigo-300 rounded text-[10px] font-mono">
-                                      {student.kelas}
-                                    </span>
-                                  </p>
+                                  <p className="font-semibold text-white">{student.nama}</p>
+                                  <p className="text-xs text-slate-400">{student.nim} • {student.kelas}</p>
                                 </div>
                               ) : (
-                                <div>
-                                  <span className="text-xs text-amber-400 italic flex items-center gap-1 font-medium">
-                                    <AlertCircle className="w-3.5 h-3.5" />
-                                    Belum Terdaftar
-                                  </span>
-                                  <p className="text-[11px] text-slate-500">Tap untuk mendaftarkan</p>
-                                </div>
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/20 text-xs font-medium">
+                                  Belum Terdaftar
+                                </span>
                               )}
                             </td>
-
-                            <td className="px-6 py-4 font-mono text-sm font-semibold text-indigo-300">
-                              {item.uid}
-                            </td>
-
                             <td className="px-6 py-4">
-                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-medium">
                                 <CheckCircle2 className="w-3.5 h-3.5" />
                                 {item.status}
                               </span>
                             </td>
-
-                            <td className="px-6 py-4 text-slate-300">
-                              <div className="flex items-center gap-1.5 text-xs">
-                                <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                                <span>{item.tanggal}</span>
-                              </div>
-                            </td>
-
-                            <td className="px-6 py-4 text-slate-300">
-                              <div className="flex items-center gap-1.5 text-xs font-mono">
-                                <Clock className="w-3.5 h-3.5 text-slate-400" />
-                                <span>{item.timestamp}</span>
-                              </div>
-                            </td>
-
-                            <td className="px-6 py-4 text-right">
-                              {student ? (
+                            <td className="px-6 py-4 text-slate-300 text-xs font-mono">{item.tanggal}</td>
+                            <td className="px-6 py-4 text-slate-300 text-xs font-mono">{item.timestamp}</td>
+                            <td className="px-6 py-4">
+                              {!student && (
                                 <button
-                                  onClick={() => openRegisterModalForUid(item.uid)}
-                                  className="text-xs text-slate-400 hover:text-indigo-300 p-1.5 rounded-lg hover:bg-slate-700 transition-all cursor-pointer"
-                                  title="Edit Mahasiswa"
+                                  onClick={() => openQuickRegister(item.uid)}
+                                  className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-2.5 py-1.5 rounded-lg font-medium transition-all"
                                 >
-                                  <Edit3 className="w-4 h-4" />
-                                </button>
-                              ) : (
-                                <button
-                                  onClick={() => openRegisterModalForUid(item.uid)}
-                                  className="px-2.5 py-1 bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500 hover:text-slate-900 font-medium text-xs rounded-lg transition-all flex items-center gap-1 ml-auto cursor-pointer"
-                                >
-                                  <UserPlus className="w-3 h-3" />
-                                  <span>Daftarkan</span>
+                                  Daftarkan
                                 </button>
                               )}
                             </td>
@@ -918,286 +930,226 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: ANALYTICS & CHARTS */}
-        {activeTab === "analytics" && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Bar Chart: Attendance per Class */}
-              <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-700/60 pb-3">
-                  <div>
-                    <h3 className="text-base font-bold text-white flex items-center gap-2">
-                      <BarChart3 className="w-5 h-5 text-indigo-400" />
-                      <span>Kehadiran Per Kelas</span>
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Jumlah & persentase presensi mahasiswa per kelas
-                    </p>
-                  </div>
+        {/* TAB 2: KELOLA MAHASISWA */}
+        {activeTab === "mahasiswa" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Form Tambah Mahasiswa */}
+            <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4 h-fit">
+              <h2 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-700/80 pb-3">
+                <UserPlus className="w-5 h-5 text-indigo-400" />
+                <span>Tambah / Edit Mahasiswa</span>
+              </h2>
+
+              <form onSubmit={handleSaveStudent} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    UID Kartu RFID
+                  </label>
+                  <input
+                    type="text"
+                    value={quickRegUid || inputNim}
+                    onChange={(e) => setInputNim(e.target.value)}
+                    placeholder="Contoh: A3B4C5D6"
+                    className="w-full px-3.5 py-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-mono"
+                    required
+                  />
                 </div>
 
-                <div className="h-72 w-full pt-4">
-                  {classChartData.length === 0 ? (
-                    <div className="h-full flex items-center justify-center text-slate-500 text-sm">
-                      Belum ada data presensi untuk dibuat grafik
-                    </div>
-                  ) : (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={classChartData}>
-                        <XAxis dataKey="kelas" stroke="#94a3b8" fontSize={12} />
-                        <YAxis stroke="#94a3b8" fontSize={12} />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "#1e293b",
-                            borderColor: "#334155",
-                            borderRadius: "0.5rem",
-                            color: "#fff"
-                          }}
-                        />
-                        <Bar dataKey="count" name="Jumlah Hadir" fill="#6366f1" radius={[6, 6, 0, 0]}>
-                          {classChartData.map((_, index) => (
-                            <Cell key={`cell-${index}`} fill={index % 2 === 0 ? "#6366f1" : "#818cf8"} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  )}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    NIM Mahasiswa
+                  </label>
+                  <input
+                    type="text"
+                    value={inputNim}
+                    onChange={(e) => setInputNim(e.target.value)}
+                    placeholder="Contoh: 210101088"
+                    className="w-full px-3.5 py-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                    required
+                  />
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Nama Lengkap
+                  </label>
+                  <input
+                    type="text"
+                    value={inputNama}
+                    onChange={(e) => setInputNama(e.target.value)}
+                    placeholder="Contoh: Budi Santoso"
+                    className="w-full px-3.5 py-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Kelas / Jurusan
+                  </label>
+                  <input
+                    type="text"
+                    value={inputKelas}
+                    onChange={(e) => setInputKelas(e.target.value)}
+                    placeholder="Contoh: TI-3A"
+                    className="w-full px-3.5 py-2.5 bg-slate-900/80 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition-all shadow-lg shadow-indigo-600/30 text-sm cursor-pointer"
+                >
+                  Simpan Master Mahasiswa
+                </button>
+              </form>
+            </div>
+
+            {/* Tabel Master Mahasiswa */}
+            <div className="lg:col-span-2 bg-slate-800/80 border border-slate-700/80 rounded-xl shadow-xl overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                <h2 className="text-base font-semibold text-white flex items-center gap-2">
+                  <Users className="w-5 h-5 text-indigo-400" />
+                  <span>Daftar Mahasiswa Terdaftar</span>
+                  <span className="text-xs bg-slate-700 text-slate-300 font-normal px-2.5 py-0.5 rounded-full">
+                    {studentList.length} Orang
+                  </span>
+                </h2>
               </div>
 
-              {/* Pie Chart: Registration Distribution */}
-              <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-700/60 pb-3">
-                  <div>
-                    <h3 className="text-base font-bold text-white flex items-center gap-2">
-                      <TrendingUp className="w-5 h-5 text-emerald-400" />
-                      <span>Rasio Status Kartu RFID</span>
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Kartu terdaftar vs belum terdaftar yang terdeteksi
-                    </p>
-                  </div>
-                </div>
-
-                <div className="h-72 w-full pt-4">
-                  {attendanceList.length === 0 ? (
-                    <div className="h-full flex items-center justify-center text-slate-500 text-sm">
-                      Belum ada data presensi
-                    </div>
-                  ) : (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={pieData}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={60}
-                          outerRadius={90}
-                          paddingAngle={5}
-                          dataKey="value"
-                        >
-                          {pieData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.color} />
-                          ))}
-                        </Pie>
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "#1e293b",
-                            borderColor: "#334155",
-                            borderRadius: "0.5rem",
-                            color: "#fff"
-                          }}
-                        />
-                        <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: "12px" }} />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  )}
-                </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-900/60 text-slate-400 uppercase text-[11px] font-semibold tracking-wider border-b border-slate-700/80">
+                    <tr>
+                      <th className="px-6 py-3.5">NIM</th>
+                      <th className="px-6 py-3.5">Nama Mahasiswa</th>
+                      <th className="px-6 py-3.5">Kelas</th>
+                      <th className="px-6 py-3.5">UID RFID</th>
+                      <th className="px-6 py-3.5 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-700/50 text-slate-200">
+                    {studentList.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-6 py-12 text-center text-slate-400">
+                          Belum ada mahasiswa yang terdaftar di database.
+                        </td>
+                      </tr>
+                    ) : (
+                      studentList.map((st) => (
+                        <tr key={st.uid} className="hover:bg-slate-700/30 transition-colors">
+                          <td className="px-6 py-4 font-mono text-xs font-semibold text-slate-300">{st.nim}</td>
+                          <td className="px-6 py-4 font-semibold text-white">{st.nama}</td>
+                          <td className="px-6 py-4 text-xs text-slate-300">{st.kelas}</td>
+                          <td className="px-6 py-4 font-mono text-xs text-indigo-400 font-semibold">{st.uid}</td>
+                          <td className="px-6 py-4 text-right">
+                            <button
+                              onClick={() => handleDeleteStudent(st.uid, st.nama)}
+                              className="p-1.5 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 rounded-lg transition-all"
+                              title="Hapus Mahasiswa"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 3: REGISTERED STUDENTS LIST */}
-        {activeTab === "students" && (
-          <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl shadow-xl overflow-hidden space-y-4 p-6">
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 border-b border-slate-700/80 pb-4">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <Users className="w-5 h-5 text-indigo-400" />
-                  <span>Daftar Mahasiswa Terdaftar</span>
+        {/* TAB 3: STATISTIK & GRAFIK */}
+        {activeTab === "grafik" && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Card Ringkasan Prosentase */}
+              <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4">
+                <h3 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-700/80 pb-3">
+                  <TrendingUp className="w-5 h-5 text-indigo-400" />
+                  <span>Ringkasan Kehadiran Realtime</span>
                 </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Path RTDB: /students/
-                </p>
+
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex justify-between text-xs font-medium mb-1.5">
+                      <span className="text-slate-300">Persentase Presensi Hari Ini</span>
+                      <span className="text-indigo-400 font-bold">
+                        {totalRegisteredStudents > 0
+                          ? Math.round((todayScans.length / totalRegisteredStudents) * 100)
+                          : 0}
+                        %
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700">
+                      <div
+                        className="bg-gradient-to-r from-indigo-500 to-emerald-400 h-full rounded-full transition-all duration-500"
+                        style={{
+                          width: `${
+                            totalRegisteredStudents > 0
+                              ? Math.min(Math.round((todayScans.length / totalRegisteredStudents) * 100), 100)
+                              : 0
+                          }%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-2">
+                    <div className="bg-slate-900/60 border border-slate-700/60 p-3 rounded-xl">
+                      <p className="text-[10px] text-slate-400 font-semibold uppercase">Total Tap Hari Ini</p>
+                      <p className="text-xl font-bold text-white mt-1">{todayScans.length} Scan</p>
+                    </div>
+                    <div className="bg-slate-900/60 border border-slate-700/60 p-3 rounded-xl">
+                      <p className="text-[10px] text-slate-400 font-semibold uppercase">Kartu Unregistered</p>
+                      <p className="text-xl font-bold text-amber-400 mt-1">{unregisteredCount} Scan</p>
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              <button
-                onClick={() => openRegisterModalForUid("")}
-                className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Tambah Mahasiswa</span>
-              </button>
-            </div>
+              {/* Status Sistem */}
+              <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4">
+                <h3 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-700/80 pb-3">
+                  <Sparkles className="w-5 h-5 text-indigo-400" />
+                  <span>Status Koneksi Hardware RFID</span>
+                </h3>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-900/60 text-slate-400 uppercase text-[11px] font-semibold tracking-wider border-b border-slate-700/80">
-                  <tr>
-                    <th className="px-6 py-3">No</th>
-                    <th className="px-6 py-3">Nama Mahasiswa</th>
-                    <th className="px-6 py-3">NIM</th>
-                    <th className="px-6 py-3">Kelas</th>
-                    <th className="px-6 py-3">UID RFID</th>
-                    <th className="px-6 py-3 text-right">Aksi</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-700/50 text-slate-200">
-                  {Object.keys(students).length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-6 py-12 text-center text-slate-400">
-                        Belum ada mahasiswa yang terdaftar. Klik "+ Register Kartu Baru" untuk menambahkan.
-                      </td>
-                    </tr>
-                  ) : (
-                    (Object.values(students) as Student[]).map((st, i) => (
-                      <tr key={st.uid} className="hover:bg-slate-700/30">
-                        <td className="px-6 py-3.5 text-xs text-slate-400 font-mono">{i + 1}</td>
-                        <td className="px-6 py-3.5 font-semibold text-white">{st.nama}</td>
-                        <td className="px-6 py-3.5 text-slate-300 font-mono text-xs">{st.nim}</td>
-                        <td className="px-6 py-3.5">
-                          <span className="px-2 py-0.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 rounded text-xs">
-                            {st.kelas}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3.5 font-mono text-xs text-indigo-300">{st.uid}</td>
-                        <td className="px-6 py-3.5 text-right">
-                          <button
-                            onClick={() => openRegisterModalForUid(st.uid)}
-                            className="text-slate-400 hover:text-indigo-300 p-1.5 rounded-lg hover:bg-slate-700 transition-all cursor-pointer"
-                          >
-                            <Edit3 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between p-3 bg-slate-900/60 border border-slate-700/60 rounded-xl">
+                    <span className="text-xs text-slate-300 font-medium">Firebase Realtime Database</span>
+                    <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 font-semibold">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                      Connected
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 bg-slate-900/60 border border-slate-700/60 rounded-xl">
+                    <span className="text-xs text-slate-300 font-medium">Web Audio Notification Sound</span>
+                    <span className="inline-flex items-center gap-1.5 text-xs text-indigo-400 font-semibold">
+                      {soundEnabled ? "Aktif" : "Mati"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 bg-slate-900/60 border border-slate-700/60 rounded-xl">
+                    <span className="text-xs text-slate-300 font-medium">ESP32 Hardware Listener</span>
+                    <span className="inline-flex items-center gap-1.5 text-xs text-sky-400 font-semibold">
+                      Standby (Path: /attendance)
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
       </main>
 
-      {/* Quick Register Modal */}
-      {isRegisterModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative space-y-5 animate-in fade-in zoom-in duration-200">
-            <button
-              onClick={() => setIsRegisterModalOpen(false)}
-              className="absolute top-4 right-4 text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            <div className="flex items-center gap-3 border-b border-slate-700 pb-4">
-              <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center">
-                <UserPlus className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-white">Quick Register Kartu RFID</h3>
-                <p className="text-xs text-slate-400">Hubungkan UID RFID dengan Data Mahasiswa</p>
-              </div>
-            </div>
-
-            {regSuccessMsg && (
-              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs rounded-xl flex items-center gap-2">
-                <Check className="w-4 h-4 text-emerald-400" />
-                <span>{regSuccessMsg}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleSaveStudent} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  UID Kartu RFID
-                </label>
-                <div className="relative">
-                  <CreditCard className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    value={regUid}
-                    onChange={(e) => setRegUid(e.target.value)}
-                    placeholder="Contoh: C3 A1 2B 1D"
-                    className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  Nama Lengkap Mahasiswa
-                </label>
-                <input
-                  type="text"
-                  value={regNama}
-                  onChange={(e) => setRegNama(e.target.value)}
-                  placeholder="Contoh: EKHY ganteng"
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  NIM
-                </label>
-                <input
-                  type="text"
-                  value={regNim}
-                  onChange={(e) => setRegNim(e.target.value)}
-                  placeholder="Contoh: 220536602097"
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  Kelas
-                </label>
-                <select
-                  value={regKelas}
-                  onChange={(e) => setRegKelas(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                >
-                  <option value="TI-C">TE C</option>
-                  <option value="TE B">TE B</option>
-                  <option value="TE A">TE A</option>
-                </select>
-              </div>
-
-              <div className="pt-2 flex items-center justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsRegisterModalOpen(false)}
-                  className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-xl text-xs font-medium transition-all"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-900 font-bold rounded-xl text-xs transition-all shadow-lg shadow-amber-500/20 cursor-pointer"
-                >
-                  Simpan Mahasiswa
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Footer */}
+      <footer className="border-t border-slate-800 py-4 text-center text-xs text-slate-500">
+        <p>Sistem Presensi RFID ESP32 & Firebase Realtime Database © 2026</p>
+      </footer>
     </div>
   );
 }
