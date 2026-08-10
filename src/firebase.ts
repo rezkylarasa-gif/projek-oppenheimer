@@ -3,9 +3,9 @@ import { getDatabase } from "firebase/database";
 import { getAuth, Auth } from "firebase/auth";
 
 const firebaseConfig = {
-  apiKey: "AQ.Ab8RN6KVlH_8TSR0enbUE8YGv2NZRsLs1AXCDg16-I8xoa4cIQ",
-  projectId: "gen-lang-client-0709914952",
-  databaseURL: "https://gen-lang-client-0709914952-default-rtdb.asia-southeast1.firebasedatabase.app",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0709914952",
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || "https://gen-lang-client-0709914952-default-rtdb.asia-southeast1.firebasedatabase.app",
 };
 
 // Initialize Firebase App
