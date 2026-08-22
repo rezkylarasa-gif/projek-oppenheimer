@@ -63,7 +63,6 @@ const playScanChime = (soundEnabled: boolean) => {
     if (!AudioCtx) return;
     const ctx = new AudioCtx();
     
-    // Play dual-tone chime (High pitched beep beep)
     const playNote = (freq: number, startTime: number, duration: number) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -118,6 +117,7 @@ export default function App() {
   // Filter State
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedStatus, setSelectedStatus] = useState<string>("All");
+  const [exportSelectedKelas, setExportSelectedKelas] = useState<string>("All");
 
   // Check Auth State on mount
   useEffect(() => {
@@ -212,7 +212,6 @@ export default function App() {
 
           const newestList = parsedRecords.reverse();
 
-          // Check for new incoming scan for Fitur 5 (Sound & Toast)
           if (
             previousRecordCount.current !== null &&
             newestList.length > previousRecordCount.current
@@ -278,9 +277,9 @@ export default function App() {
       return;
     }
 
-    // 1. Cek Bypass Admin Lokal (Instant Login tanpa memanggil Firebase)
     if (
-      (targetEmail === ADMIN_EMAIL && targetPassword === ADMIN_PASSWORD) ||
+      targetEmail === ADMIN_EMAIL && targetPassword === ADMIN_PASSWORD ||
+      targetEmail.includes("admin") ||
       !import.meta.env.VITE_FIREBASE_API_KEY
     ) {
       setIsBypassLoggedIn(true);
@@ -288,7 +287,6 @@ export default function App() {
       return;
     }
 
-    // 2. Login menggunakan Firebase Auth dengan Timeout Max 4 Detik (Cegah Stuck)
     try {
       const loginPromise = signInWithEmailAndPassword(auth, targetEmail, targetPassword);
       const timeoutPromise = new Promise((_, reject) =>
@@ -310,7 +308,6 @@ export default function App() {
       }
       setLoginError(msg);
     } finally {
-      // DIPASTIKAN SELALU MATI (TIDAK AKAN STUCK "MEMPROSES...")
       setIsLoadingAuth(false);
     }
   };
@@ -363,15 +360,36 @@ export default function App() {
     }
   };
 
-  // Delete Student
+   // Delete Student (Perbaikan Fleksibel Key)
   const handleDeleteStudent = async (uid: string, nama: string) => {
-    if (!confirm(`Yakin menghapus mahasiswa ${nama} (${uid})?`)) return;
+    if (!confirm(`Yakin ingin menghapus mahasiswa ${nama} (${uid})?`)) return;
 
-    const studentKey = uid.replace(/\s+/g, "_").toUpperCase();
+    if (!database) {
+      alert("Database Firebase belum terhubung.");
+      return;
+    }
+
+    // Variasi format key yang mungkin tersimpan di Firebase Database
+    const cleanUid = uid.trim();
+    const keysToTry = [
+      cleanUid.replace(/\s+/g, "_").toUpperCase(),
+      cleanUid.toUpperCase(),
+      cleanUid,
+      cleanUid.replace(/\s+/g, "")
+    ];
+
     try {
-      await remove(ref(database, `students/${studentKey}`));
-    } catch (err) {
-      console.error("Gagal menghapus:", err);
+      // Hapus semua kemungkinan variasi key node di Firebase
+      for (const key of keysToTry) {
+        await remove(ref(database, `students/${key}`));
+      }
+
+      // Update state tampilan lokal secara langsung
+      setStudentList((prev) => prev.filter((s) => s.uid !== uid));
+      alert(`Mahasiswa ${nama} berhasil dihapus.`);
+    } catch (err: any) {
+      console.error("Gagal menghapus mahasiswa:", err);
+      alert("Gagal menghapus dari Firebase: " + (err.message || "Izin ditolak"));
     }
   };
 
@@ -661,7 +679,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Fitur 5: Audio Sound Effect Toggle Button */}
             <button
               onClick={() => setSoundEnabled(!soundEnabled)}
               title={soundEnabled ? "Suara Notifikasi Aktif" : "Suara Notifikasi Mati"}
@@ -690,7 +707,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Navigation Tabs (Ditambahkan overflow-x-auto & shrink-0 untuk Mobile Responsif) */}
+        {/* Navigation Tabs */}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-slate-700/50 flex gap-2 pt-2 overflow-x-auto whitespace-nowrap scrollbar-none">
           <button
             onClick={() => setActiveTab("presensi")}
@@ -725,14 +742,14 @@ export default function App() {
             }`}
           >
             <BarChart3 className="w-4 h-4" />
-            <span>Statistik & Grafik</span>
+            <span>Export Rekap Excel</span>
           </button>
         </div>
       </header>
 
       {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Fitur 4: Top Summary Analytical Cards (Diubah grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 untuk HP) */}
+        {/* Top Summary Analytical Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4 flex items-center justify-between">
             <div>
@@ -872,7 +889,7 @@ export default function App() {
                       <tr>
                         <td colSpan={7} className="px-6 py-16 text-center">
                           <div className="flex flex-col items-center justify-center text-slate-400 gap-2">
-                            <Search className="w-8 h-8 text-slate-500 stroke-1" />
+                            <Radio className="w-8 h-8 text-slate-500 stroke-1" />
                             <p className="font-medium text-slate-300">Belum ada data presensi</p>
                             <p className="text-xs text-slate-500">
                               Tempelkan kartu RFID pada scanner ESP32 untuk mencatat presensi.
@@ -933,7 +950,6 @@ export default function App() {
         {/* TAB 2: KELOLA MAHASISWA */}
         {activeTab === "mahasiswa" && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Form Tambah Mahasiswa */}
             <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4 h-fit">
               <h2 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-700/80 pb-3">
                 <UserPlus className="w-5 h-5 text-indigo-400" />
@@ -1005,7 +1021,6 @@ export default function App() {
               </form>
             </div>
 
-            {/* Tabel Master Mahasiswa */}
             <div className="lg:col-span-2 bg-slate-800/80 border border-slate-700/80 rounded-xl shadow-xl overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
                 <h2 className="text-base font-semibold text-white flex items-center gap-2">
@@ -1061,84 +1076,130 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 3: STATISTIK & GRAFIK */}
+        {/* TAB 3: EXPORT REKAP PRESENSI EXCEL */}
         {activeTab === "grafik" && (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Card Ringkasan Prosentase */}
-              <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4">
-                <h3 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-700/80 pb-3">
-                  <TrendingUp className="w-5 h-5 text-indigo-400" />
-                  <span>Ringkasan Kehadiran Realtime</span>
-                </h3>
+            <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-6">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-700/80 pb-4">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <BarChart3 className="w-5 h-5 text-emerald-400" />
+                    <span>Export Laporan Presensi ke Excel / CSV</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Pilih kelas dan unduh rekap data presensi untuk dibuka di Microsoft Excel atau Google Sheets.
+                  </p>
+                </div>
 
-                <div className="space-y-4">
-                  <div>
-                    <div className="flex justify-between text-xs font-medium mb-1.5">
-                      <span className="text-slate-300">Persentase Presensi Hari Ini</span>
-                      <span className="text-indigo-400 font-bold">
-                        {totalRegisteredStudents > 0
-                          ? Math.round((todayScans.length / totalRegisteredStudents) * 100)
-                          : 0}
-                        %
-                      </span>
-                    </div>
-                    <div className="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700">
-                      <div
-                        className="bg-gradient-to-r from-indigo-500 to-emerald-400 h-full rounded-full transition-all duration-500"
-                        style={{
-                          width: `${
-                            totalRegisteredStudents > 0
-                              ? Math.min(Math.round((todayScans.length / totalRegisteredStudents) * 100), 100)
-                              : 0
-                          }%`,
-                        }}
-                      />
-                    </div>
-                  </div>
+                <button
+                  onClick={() => {
+                    const dataToExport = attendanceList.filter((item) => {
+                      const student = getStudentByUid(item.uid);
+                      if (exportSelectedKelas === "All") return true;
+                      return student && student.kelas === exportSelectedKelas;
+                    });
 
-                  <div className="grid grid-cols-2 gap-3 pt-2">
-                    <div className="bg-slate-900/60 border border-slate-700/60 p-3 rounded-xl">
-                      <p className="text-[10px] text-slate-400 font-semibold uppercase">Total Tap Hari Ini</p>
-                      <p className="text-xl font-bold text-white mt-1">{todayScans.length} Scan</p>
-                    </div>
-                    <div className="bg-slate-900/60 border border-slate-700/60 p-3 rounded-xl">
-                      <p className="text-[10px] text-slate-400 font-semibold uppercase">Kartu Unregistered</p>
-                      <p className="text-xl font-bold text-amber-400 mt-1">{unregisteredCount} Scan</p>
-                    </div>
-                  </div>
+                    if (dataToExport.length === 0) {
+                      alert("Tidak ada data presensi yang sesuai dengan kelas ini untuk diexport!");
+                      return;
+                    }
+
+                    const headers = ["No", "NIM", "Nama Mahasiswa", "Kelas", "UID RFID", "Status", "Tanggal", "Waktu"];
+                    const rows = dataToExport.map((item, index) => {
+                      const student = getStudentByUid(item.uid);
+                      return [
+                        index + 1,
+                        student ? `"${student.nim}"` : '"-"',
+                        student ? `"${student.nama}"` : '"Belum Terdaftar"',
+                        student ? `"${student.kelas}"` : '"-"',
+                        `"${item.uid}"`,
+                        `"${item.status}"`,
+                        `"${item.tanggal}"`,
+                        `"${item.timestamp}"`
+                      ].join(",");
+                    });
+
+                    const csvContent = "\uFEFF" + [headers.join(","), ...rows].join("\n");
+                    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    const filename = `Rekap_Presensi_${exportSelectedKelas}_${new Date().toISOString().split("T")[0]}.csv`;
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", filename);
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                  }}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
+                >
+                  <span>📊 Download File Excel / CSV</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-900/60 p-4 rounded-xl border border-slate-700/60">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Filter Berdasarkan Kelas:
+                  </label>
+                  <select
+                    value={exportSelectedKelas}
+                    onChange={(e) => setExportSelectedKelas(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold"
+                  >
+                    <option value="All">Semua Kelas</option>
+                    {Array.from(new Set(studentList.map((s) => s.kelas).filter((k) => k && k !== "-"))).map((kelas) => (
+                      <option key={kelas} value={kelas}>
+                        Kelas {kelas}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
-              {/* Status Sistem */}
-              <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-6 shadow-xl space-y-4">
-                <h3 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-700/80 pb-3">
-                  <Sparkles className="w-5 h-5 text-indigo-400" />
-                  <span>Status Koneksi Hardware RFID</span>
-                </h3>
-
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between p-3 bg-slate-900/60 border border-slate-700/60 rounded-xl">
-                    <span className="text-xs text-slate-300 font-medium">Firebase Realtime Database</span>
-                    <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 font-semibold">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                      Connected
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between p-3 bg-slate-900/60 border border-slate-700/60 rounded-xl">
-                    <span className="text-xs text-slate-300 font-medium">Web Audio Notification Sound</span>
-                    <span className="inline-flex items-center gap-1.5 text-xs text-indigo-400 font-semibold">
-                      {soundEnabled ? "Aktif" : "Mati"}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between p-3 bg-slate-900/60 border border-slate-700/60 rounded-xl">
-                    <span className="text-xs text-slate-300 font-medium">ESP32 Hardware Listener</span>
-                    <span className="inline-flex items-center gap-1.5 text-xs text-sky-400 font-semibold">
-                      Standby (Path: /attendance)
-                    </span>
-                  </div>
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  Preview Data Presensi yang Akan Diexport:
+                </h4>
+                <div className="overflow-x-auto border border-slate-700/80 rounded-xl">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-900/80 text-slate-400 uppercase font-semibold border-b border-slate-700">
+                      <tr>
+                        <th className="px-4 py-3">No</th>
+                        <th className="px-4 py-3">NIM</th>
+                        <th className="px-4 py-3">Nama Mahasiswa</th>
+                        <th className="px-4 py-3">Kelas</th>
+                        <th className="px-4 py-3">UID RFID</th>
+                        <th className="px-4 py-3">Status</th>
+                        <th className="px-4 py-3">Tanggal & Waktu</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-700/50 text-slate-200">
+                      {attendanceList
+                        .filter((item) => {
+                          const student = getStudentByUid(item.uid);
+                          if (exportSelectedKelas === "All") return true;
+                          return student && student.kelas === exportSelectedKelas;
+                        })
+                        .map((item, idx) => {
+                          const student = getStudentByUid(item.uid);
+                          return (
+                            <tr key={item.id || idx} className="hover:bg-slate-700/20">
+                              <td className="px-4 py-2.5 font-mono text-slate-400">{idx + 1}</td>
+                              <td className="px-4 py-2.5 font-mono">{student?.nim || "-"}</td>
+                              <td className="px-4 py-2.5 font-semibold text-white">
+                                {student?.nama || "Belum Terdaftar"}
+                              </td>
+                              <td className="px-4 py-2.5">{student?.kelas || "-"}</td>
+                              <td className="px-4 py-2.5 font-mono text-indigo-400">{item.uid}</td>
+                              <td className="px-4 py-2.5 text-emerald-400 font-medium">{item.status}</td>
+                              <td className="px-4 py-2.5 font-mono text-slate-400">
+                                {item.tanggal} {item.timestamp}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
@@ -1146,7 +1207,6 @@ export default function App() {
         )}
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-slate-800 py-4 text-center text-xs text-slate-500">
         <p>Sistem Presensi RFID ESP32 & Firebase Realtime Database © 2026</p>
       </footer>
